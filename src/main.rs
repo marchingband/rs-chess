@@ -1,5 +1,4 @@
-use std::io;
-use std::io::stdout;
+#![warn(clippy::all)]
 
 use crossterm::{
     cursor::{MoveTo, MoveToNextLine},
@@ -8,7 +7,13 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
     terminal::{Clear, ClearType},
 };
-
+use rand::prelude::*;
+use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::io;
+use std::io::stdout;
+use std::sync::{Arc, Mutex};
+use std::{thread, time};
 use Color::*;
 use Kind::*;
 
@@ -417,7 +422,7 @@ fn push_if_not_empty(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8, mover: P
     }
 }
 
-fn push_if_empty(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8, piece: Piece) -> bool {
+fn push_if_empty(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8) -> bool {
     if x > 7 || y > 7 || x < 0 || y < 0 {
         return false;
     }
@@ -452,19 +457,18 @@ fn try_push(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8, mover: Piece) -> 
 fn allow_moves(board: &Board, location: Pos, turn: Color) -> Vec<Pos> {
     let square = board.at(location);
     let mut moves: Vec<Pos> = vec![];
-    let piece: Piece;
-    match square {
+    let piece = match square {
         Some(occ) => {
             if occ.color != turn {
                 // not your turn
                 return moves;
             }
-            piece = occ;
+            occ
         }
         None => {
             return moves;
         }
-    }
+    };
     let x: i8 = location.0 as i8;
     let y: i8 = location.1 as i8;
     match piece.kind {
@@ -577,8 +581,8 @@ fn allow_moves(board: &Board, location: Pos, turn: Color) -> Vec<Pos> {
         Pawn => {
             let home = if turn == White { 1 } else { 6 };
             let dir: i8 = if turn == White { 1 } else { -1 };
-            if push_if_empty(board, &mut moves, x, y + dir, piece) && y == home {
-                push_if_empty(board, &mut moves, x, y + (dir * 2), piece);
+            if push_if_empty(board, &mut moves, x, y + dir) && y == home {
+                push_if_empty(board, &mut moves, x, y + (dir * 2));
             }
             push_if_not_empty(board, &mut moves, x + 1, y + dir, piece);
             push_if_not_empty(board, &mut moves, x - 1, y + dir, piece);
@@ -643,7 +647,6 @@ fn handle_event(game: &mut Game) -> bool {
                         execute_move(game, game.from, game.cur);
                         game.print();
                         cpu_turn(game);
-
                     } else if game.cur == game.from {
                         // drop the piece
                         game.moving = false;
@@ -662,9 +665,9 @@ fn black_respond(board: &Board) -> Board {
     let mut responses: Vec<Board> = vec![];
     let pieces: Vec<Pos> = board.get_all(Black);
     for from in pieces {
-        let moves = allow_moves(&board, from, Black);
+        let moves = allow_moves(board, from, Black);
         for to in moves {
-            let mut option = board.clone();
+            let mut option = *board;
             option.move_piece(from, to);
             responses.push(option);
         }
@@ -682,16 +685,16 @@ fn white_respond(board: &Board) -> Board {
     let mut responses: Vec<Board> = vec![];
     let pieces: Vec<Pos> = board.get_all(White);
     for from in pieces {
-        let moves = allow_moves(&board, from, White);
+        let moves = allow_moves(board, from, White);
         for to in moves {
-            let mut option = board.clone();
+            let mut option = *board;
             option.move_piece(from, to);
             responses.push(option);
         }
     }
     // pick the best for white based on the black simple response
     responses.iter().fold(responses[0], |acc, val| {
-        if black_respond(&acc).evaluate(White) > black_respond(&val).evaluate(White) {
+        if black_respond(&acc).evaluate(White) > black_respond(val).evaluate(White) {
             acc
         } else {
             *val
@@ -703,9 +706,9 @@ fn get_opts(board: &Board) -> Vec<Opt> {
     let mut options: Vec<Opt> = vec![];
     let pieces: Vec<Pos> = board.get_all(Black);
     for from in pieces {
-        let moves = allow_moves(&board, from, Black);
+        let moves = allow_moves(board, from, Black);
         for to in moves {
-            let mut option = board.clone();
+            let mut option = *board;
             option.move_piece(from, to);
             options.push(Opt {
                 from,
@@ -720,10 +723,27 @@ fn get_opts(board: &Board) -> Vec<Opt> {
     options
 }
 
-fn pick_option(options: &Vec<Opt>) -> Move{
-    let mut list: Vec<Move> = vec![];
-    for i in 0..options.len() {
-        let choices: Vec<Board> = options[i].tree.dig();
+fn pick_option(options: Vec<Opt>) -> Move {
+    // let list = Arc::new(Mutex::new(vec!()));
+    // options.into_par_iter().for_each(|option| {
+    //     let choices: Vec<Board> = option.tree.dig();
+    //     let high_score: i32 = choices.iter().fold(choices[0].evaluate(Black), |acc, val| {
+    //         let score = val.evaluate(Black);
+    //         if acc > score {
+    //             acc
+    //         } else {
+    //             score
+    //         }
+    //     });
+    //     list.lock().unwrap().push(Move{
+    //         from: option.from,
+    //         to: option.to,
+    //         score: high_score
+    //     })
+    // });
+    let mut moves: Vec<Move> = vec![];
+    for option in options {
+        let choices: Vec<Board> = option.tree.dig();
         let high_score: i32 = choices.iter().fold(choices[0].evaluate(Black), |acc, val| {
             let score = val.evaluate(Black);
             if acc > score {
@@ -732,32 +752,56 @@ fn pick_option(options: &Vec<Opt>) -> Move{
                 score
             }
         });
-        list.push(Move{
-            from: options[i].from,
-            to: options[i].to,
-            score: high_score
+        moves.push(Move {
+            from: option.from,
+            to: option.to,
+            score: high_score,
         })
     }
-    list.iter().fold(list[0], |acc, val| {
-        if acc.score > val.score {
-            acc
-        } else {
-            *val
+    let mut best_moves: Vec<Move> = vec![moves[0]];
+    for candidate in moves.iter().skip(1) {
+        match (candidate.score).cmp(&best_moves[0].score) {
+            Ordering::Greater => best_moves = vec![*candidate],
+            Ordering::Equal => best_moves.push(*candidate),
+            _ => {}
         }
-    })
+    }
+    let mut rng = thread_rng();
+    let im_so_random = rng.gen_range(0, best_moves.len());
+    // print!("found {} options, chose {}", best_moves.len(), it);
+    // next_line();
+    // thread::sleep(time::Duration::from_secs(2));
+    best_moves[im_so_random]
+    // list.iter().fold(list[0], |acc, val| {
+    //     if acc.score > val.score {
+    //         acc
+    //     } else {
+    //         *val
+    //     }
+    // })
+    // let list2 = list.lock().unwrap();
+    // list2.iter().fold(list2[0], |acc, val| {
+    //     if acc.score > val.score {
+    //         acc
+    //     } else {
+    //         *val
+    //     }
+    // })
 }
 
+#[derive(Clone)]
 struct Node {
     board: Board,
     children: Option<Vec<Node>>,
 }
 
 impl Node {
-    fn grow(& mut self) {
+    fn grow(&mut self) {
         if let Some(children) = &mut self.children {
-            for i in 0..children.len() {
-                children[i].grow();
-            }
+            children.into_par_iter().for_each(|child| child.grow());
+            // for i in 0..children.len() {
+            //     children[i].grow();
+            // }
         } else {
             let mut children: Vec<Node> = vec![];
             let board = white_respond(&self.board);
@@ -765,7 +809,7 @@ impl Node {
             for from in pieces {
                 let moves = allow_moves(&board, from, Black);
                 for to in moves {
-                    let mut option = board.clone();
+                    let mut option = board;
                     option.move_piece(from, to);
                     children.push(Node {
                         board: option,
@@ -778,20 +822,30 @@ impl Node {
     }
     fn dig(&self) -> Vec<Board> {
         if let Some(children) = &self.children {
-            let mut list: Vec<Board> = vec![];
-            for i in 0..children.len() {
-                let grand_children: Vec<Board> = children[i].dig();
-                for j in 0..grand_children.len() {
-                    list.push(grand_children[j]);
+            // let descendants = Arc::new(Mutex::new(vec![]));
+            // children.into_par_iter().for_each(|child| {
+            //     let grand_children: Vec<Board> = child.dig();
+            //     for j in 0..grand_children.len() {
+            //         descendants.lock().unwrap().push(grand_children[j]);
+            //     }
+            // });
+            // return descendants.lock().unwrap().clone();
+            let mut descendants: Vec<Board> = vec![];
+            for child in children {
+                let grand_children: Vec<Board> = child.dig();
+                for grand_child in grand_children {
+                    descendants.push(grand_child);
                 }
             }
-            return list;
+            // return descendants.lock().unwrap();
+            descendants
         } else {
             return vec![self.board];
         }
     }
 }
 
+#[derive(Clone)]
 struct Opt {
     from: Pos,
     to: Pos,
@@ -800,14 +854,12 @@ struct Opt {
 
 fn cpu_turn(game: &mut Game) {
     let mut options: Vec<Opt> = get_opts(&game.brd);
-
-    for i in 0..options.len() {
-        options[i].tree.grow();
-        options[i].tree.grow();
-        // options[i].tree.grow();
+    for option in &mut options {
+        option.tree.grow();
+        // option.tree.grow();
+        // option.tree.grow();
     }
-
-    let choice: Move = pick_option(&options);
+    let choice: Move = pick_option(options);
     execute_move(game, choice.from, choice.to);
     game.cur = choice.to;
 }
@@ -817,8 +869,6 @@ fn main() -> io::Result<()> {
     enable_raw_mode()?;
     game.print();
     while handle_event(&mut game) {
-        // game.print();
-        // cpu_turn(&mut game);
         game.print();
     }
     disable_raw_mode()?;
