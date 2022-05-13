@@ -1,5 +1,5 @@
 #![warn(clippy::all)]
-
+use std::sync::{atomic};
 use crossterm::{
     cursor::{MoveTo, MoveToNextLine},
     event::{read, Event, KeyCode},
@@ -143,6 +143,10 @@ struct Game {
     captured_by_black: Vec<Piece>,
     captured_by_white: Vec<Piece>,
 }
+static white_can_castle_left:   atomic::AtomicBool = atomic::AtomicBool::new(true);
+static white_can_castle_right:  atomic::AtomicBool = atomic::AtomicBool::new(true);
+static black_can_castle_left:   atomic::AtomicBool = atomic::AtomicBool::new(true);
+static black_can_castle_right:  atomic::AtomicBool = atomic::AtomicBool::new(true);
 
 impl Game {
     fn render(&self) -> Vec<String> {
@@ -435,6 +439,29 @@ fn push_if_empty(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8) -> bool {
     }
 }
 
+const rel: atomic::Ordering = atomic::Ordering::Relaxed;
+
+fn try_castle(board: &Board, moves: &mut Vec<Pos>, mover: Piece){
+    match mover.color {
+        White => {
+            if white_can_castle_left.load(rel) && ![(1,0), (2,0)].iter().any(|&square| board.at(square).is_some()) {
+                moves.push((1,0));
+            }
+            if white_can_castle_right.load(rel) && ![(4,0), (5,0), (6,0)].iter().any(|&square| board.at(square).is_some()) {
+                moves.push((6,0));
+            }
+        }
+        Black => {
+            if black_can_castle_left.load(rel) && ![(1,7), (2,7)].iter().any(|&square| board.at(square).is_some()) {
+                moves.push((1,0));
+            }
+            if black_can_castle_right.load(rel) && ![(4,7), (5,7), (6,7)].iter().any(|&square| board.at(square).is_some()) {
+                moves.push((6,0));
+            }
+        }
+    }
+}
+
 fn try_push(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8, mover: Piece) -> bool {
     if x > 7 || y > 7 || x < 0 || y < 0 {
         return false;
@@ -577,6 +604,7 @@ fn allow_moves(board: &Board, location: Pos, turn: Color) -> Vec<Pos> {
             try_push(board, &mut moves, x - 1, y - 1, piece);
             try_push(board, &mut moves, x, y + 1, piece);
             try_push(board, &mut moves, x, y - 1, piece);
+            try_castle(board, &mut moves, piece);
         }
         Pawn => {
             let home = if turn == White { 1 } else { 6 };
@@ -592,6 +620,59 @@ fn allow_moves(board: &Board, location: Pos, turn: Color) -> Vec<Pos> {
 }
 
 fn execute_move(game: &mut Game, from: Pos, to: Pos) {
+    if let Some(piece) = game.brd.at(from) { // castling logic
+        match (piece.kind, piece.color, from, to) {
+            (Rook, White, (0, 0), _) => white_can_castle_left.store(false, rel),
+            (Rook, White, (7, 0), _) => white_can_castle_right.store(false, rel),
+            (Rook, Black, (0, 7), _) => black_can_castle_left.store(false, rel),
+            (Rook, Black, (7, 7), _) => black_can_castle_right.store(false, rel),
+            (King, White, (3, 0), (1, 0)) => {
+                white_can_castle_left.store(false, rel);
+                white_can_castle_right.store(false, rel);
+                game.brd.move_piece(from, to);
+                game.brd.move_piece((0, 0), (2, 0)); // castle left
+                game.moving = false;
+                game.turn = if game.turn == Black { White } else { Black };
+                return;            
+            }
+            (King, White, (3, 0), (6, 0)) => {
+                white_can_castle_left.store(false, rel);
+                white_can_castle_right.store(false, rel);
+                game.brd.move_piece(from, to);
+                game.brd.move_piece((7, 0), (5, 0)); // castle right
+                game.moving = false;
+                game.turn = if game.turn == Black { White } else { Black };            
+                return;            
+            }
+            (King, Black, (3, 7), (1,7)) => {
+                white_can_castle_left.store(false, rel);
+                white_can_castle_right.store(false, rel);
+                game.brd.move_piece(from, to);
+                game.brd.move_piece((0, 7), (2, 7)); // castle left
+                game.moving = false;
+                game.turn = if game.turn == Black { White } else { Black };            
+                return;            
+            }
+            (King, Black, (3, 7), (6,7)) => {
+                white_can_castle_left.store(false, rel);
+                white_can_castle_right.store(false, rel);
+                game.brd.move_piece(from, to);
+                game.brd.move_piece((7, 7), (5, 7)); // castle right
+                game.moving = false;
+                game.turn = if game.turn == Black { White } else { Black };
+                return;            
+            }
+            (King, White, _, _) => {
+                white_can_castle_left.store(false, rel);
+                white_can_castle_right.store(false, rel);
+            }
+            (King, Black, _, _) => {
+                black_can_castle_right.store(false, rel);
+                black_can_castle_left.store(false, rel);
+            }
+            _ => {}
+        }
+    }
     if let Some(piece) = game.brd.move_piece(from, to) {
         game.capture(piece)
     }
