@@ -249,22 +249,6 @@ impl fmt::Display for Piece {
     }
 }
 
-#[derive(Clone)]
-struct Game {
-    cur: Pos,
-    brd: Board,
-    moving: bool,
-    from: Pos,
-    mover: Piece,
-    turn: Color,
-    captured_by_black: Vec<Piece>,
-    captured_by_white: Vec<Piece>,
-    white_can_castle_left: bool,
-    white_can_castle_right: bool,
-    black_can_castle_left: bool,
-    black_can_castle_right: bool,
-}
-
 #[derive(Clone, Copy)]
 struct Turn {
     from: Pos,
@@ -341,6 +325,22 @@ impl Node {
         game.undo_move(&self.turn, taken);
         res
     }
+}
+
+#[derive(Clone)]
+struct Game {
+    cur: Pos,
+    brd: Board,
+    moving: bool,
+    from: Pos,
+    mover: Piece,
+    turn: Color,
+    captured_by_black: Vec<Piece>,
+    captured_by_white: Vec<Piece>,
+    white_can_castle_left: bool,
+    white_can_castle_right: bool,
+    black_can_castle_left: bool,
+    black_can_castle_right: bool,
 }
 
 impl Game {
@@ -810,7 +810,6 @@ impl Game {
         }
         score
     }
-
 }
 
 fn clear_screen() {
