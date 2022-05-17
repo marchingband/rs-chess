@@ -265,6 +265,12 @@ struct Game {
     black_can_castle_right: bool,
 }
 
+#[derive(Clone, Copy)]
+struct Turn {
+    from: Pos,
+    to: Pos,
+}
+
 struct Node {
     turn: Turn,
     children: Option<Vec<Node>>,
@@ -296,7 +302,7 @@ impl Node {
                     .collect(),
             );
         }
-        game.brd.undo_move(&self.turn, taken);
+        game.undo_move(&self.turn, taken);
     }
     fn minmax(&self, game: &mut Game, alpha: i32, beta: i32, is_max: bool) -> i32 {
         let mut a = alpha;
@@ -330,9 +336,9 @@ impl Node {
                 }
             }
         } else {
-            game.brd.evaluate(Black)
+            game.evaluate(Black)
         };
-        game.brd.undo_move(&self.turn, taken);
+        game.undo_move(&self.turn, taken);
         res
     }
 }
@@ -399,8 +405,8 @@ impl Game {
         next_line();
         print!(
             "{} to {}",
-            self.brd.evaluate(White),
-            self.brd.evaluate(Black)
+            self.evaluate(White),
+            self.evaluate(Black)
         );
         next_line();
     }
@@ -431,13 +437,19 @@ impl Game {
         self.brd[y][x] = None;
         taken
     }
+    fn undo_move(&mut self, turn: &Turn, taken: Square) {
+        let (a, b) = turn.from;
+        let (x, y) = turn.to;
+        self.brd[b][a] = self.brd[y][x];
+        self.brd[y][x] = taken;
+    }
     fn at(&self, at: Pos) -> Square {
         self.brd[at.1][at.0]
     }
     fn execute_move(&mut self, turn: Turn) {
         let did_castle = self.castling(turn);
         if !did_castle {
-            if let Some(piece) = self.brd.move_piece(turn) {
+            if let Some(piece) = self.move_piece(turn) {
                 self.capture(piece)
             }
         }
@@ -485,7 +497,7 @@ impl Game {
                 if self.white_can_castle_left
                     && ![(1, 0), (2, 0)]
                         .iter()
-                        .any(|&square| self.brd.at(square).is_some())
+                        .any(|&square| self.at(square).is_some())
                 {
                     moves.push((1, 0));
                 }
@@ -781,26 +793,9 @@ impl Game {
         }
         nodes
     }
-}
-
-#[derive(Clone, Copy)]
-struct Turn {
-    from: Pos,
-    to: Pos,
-}
-
-trait Chess {
-    fn all_pieces(&self, color: Color) -> Vec<Pos>;
-    fn at(&self, at: Pos) -> Square;
-    fn evaluate(&self, color: Color) -> i32;
-    fn move_piece(&mut self, turn: Turn) -> Square;
-    fn undo_move(&mut self, turn: &Turn, taken: Square);
-}
-
-impl Chess for Board {
     fn evaluate(&self, color: Color) -> i32 {
         let mut score: i32 = 0;
-        for (y, row) in self.iter().enumerate() {
+        for (y, row) in self.brd.iter().enumerate() {
             for (x, square) in row.iter().enumerate() {
                 if let Some(piece) = square {
                     if piece.color == color {
@@ -815,36 +810,7 @@ impl Chess for Board {
         }
         score
     }
-    fn all_pieces(&self, color: Color) -> Vec<Pos> {
-        let mut result: Vec<Pos> = vec![];
-        for (y, row) in self.iter().enumerate() {
-            for (x, square) in row.iter().enumerate() {
-                if let Some(piece) = square {
-                    if piece.color == color {
-                        result.push((x, y));
-                    }
-                }
-            }
-        }
-        result
-    }
-    fn move_piece(&mut self, turn: Turn) -> Square {
-        let (a, b) = turn.to;
-        let (x, y) = turn.from;
-        let taken = self[b][a];
-        self[b][a] = self[y][x];
-        self[y][x] = None;
-        taken
-    }
-    fn at(&self, at: Pos) -> Square {
-        self[at.1][at.0]
-    }
-    fn undo_move(&mut self, turn: &Turn, taken: Square) {
-        let (a, b) = turn.from;
-        let (x, y) = turn.to;
-        self[b][a] = self[y][x];
-        self[y][x] = taken;
-    }
+
 }
 
 fn clear_screen() {
@@ -890,7 +856,7 @@ fn handle_event(game: &mut Game) -> bool {
             }
             KeyCode::Enter => {
                 if !game.moving {
-                    match game.brd.at(game.cur) {
+                    match game.at(game.cur) {
                         Some(piece) => {
                             if piece.color != game.turn {
                                 return true;
