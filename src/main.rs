@@ -1,9 +1,4 @@
 #![warn(clippy::all)]
-use std::cmp::Ordering;
-use std::fmt;
-use std::io;
-use std::io::stdout;
-use std::sync::{Arc, Mutex};
 use crossterm::{
     cursor::{MoveTo, MoveToNextLine},
     event::{read, Event, KeyCode},
@@ -13,6 +8,11 @@ use crossterm::{
 };
 use rand::prelude::*;
 use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::fmt;
+use std::io;
+use std::io::stdout;
+use std::sync::{Arc, Mutex};
 use Color::*;
 use Kind::*;
 
@@ -178,7 +178,6 @@ static NEW_BOARD: Game = Game {
     white_can_castle_right: true,
     black_can_castle_left: true,
     black_can_castle_right: true,
-
 };
 
 static PIECE_VALUES: [u8; 6] = [
@@ -280,8 +279,7 @@ impl Node {
             }
         } else {
             self.children = Some(
-                game
-                    .all_pieces(color)
+                game.all_pieces(color)
                     .iter()
                     .flat_map(|from| {
                         game.legal_moves(*from, color)
@@ -471,17 +469,14 @@ impl Game {
                         _ => acc,
                     }
                 });
-    
         let mut rng = thread_rng();
         let im_so_random = rng.gen_range(0, best.len());
         let choice = best[im_so_random].1;
-    
-        self.execute_move(
-            Turn {
-                from: choice.from,
-                to: choice.to,
-            },
-        );
+
+        self.execute_move(Turn {
+            from: choice.from,
+            to: choice.to,
+        });
         self.cur = choice.to;
     }
     fn try_castle(&self, moves: &mut Vec<Pos>, mover: Piece) {
@@ -520,7 +515,6 @@ impl Game {
             }
         }
     }
-    
     fn legal_moves(&self, location: Pos, turn: Color) -> Vec<Pos> {
         let square = self.at(location);
         let mut moves: Vec<Pos> = vec![];
@@ -551,12 +545,12 @@ impl Game {
                     }
                 }
                 for _y in (y + 1)..8 {
-                    if !self.try_push( &mut moves, x, _y, piece) {
+                    if !self.try_push(&mut moves, x, _y, piece) {
                         break;
                     }
                 }
                 for _y in (0..y).rev() {
-                    if !self.try_push( &mut moves, x, _y, piece) {
+                    if !self.try_push(&mut moves, x, _y, piece) {
                         break;
                     }
                 }
@@ -658,7 +652,6 @@ impl Game {
         }
         moves
     }
-    
     fn castling(&mut self, turn: Turn) -> bool {
         if let Some(piece) = self.at(turn.from) {
             match (piece.kind, piece.color, turn.from, turn.to) {
@@ -761,7 +754,7 @@ impl Game {
                 moves.push((x as usize, y as usize));
             }
         }
-    } 
+    }
     fn push_if_empty(&self, moves: &mut Vec<Pos>, x: i8, y: i8) -> bool {
         if x > 7 || y > 7 || x < 0 || y < 0 {
             return false;
@@ -855,16 +848,22 @@ impl Chess for Board {
 }
 
 fn clear_screen() {
-    execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0));
+    if let Err(e) = execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0)) {
+        print!("terminal error: {}", e);
+        std::process::exit(1);
+    }
 }
 
 fn next_line() {
-    execute!(stdout(), MoveToNextLine(2),);
+    if let Err(e) = execute!(stdout(), MoveToNextLine(2)) {
+        print!("terminal error: {}", e);
+        std::process::exit(1);
+    }
 }
 
 fn handle_event(game: &mut Game) -> bool {
-    match read().unwrap() {
-        Event::Key(event) => match event.code {
+    if let Ok(Event::Key(event)) = read() {
+        match event.code {
             KeyCode::Up => {
                 if game.cur.1 > 0 {
                     game.cur.1 -= 1;
@@ -907,12 +906,10 @@ fn handle_event(game: &mut Game) -> bool {
                 } else {
                     let moves = game.legal_moves(game.from, game.turn);
                     if moves.contains(&game.cur) {
-                        game.execute_move(
-                            Turn {
-                                from: game.from,
-                                to: game.cur,
-                            },
-                        );
+                        game.execute_move(Turn {
+                            from: game.from,
+                            to: game.cur,
+                        });
                         game.print();
                         game.cpu_turn();
                     } else if game.cur == game.from {
@@ -924,14 +921,18 @@ fn handle_event(game: &mut Game) -> bool {
             }
             KeyCode::Esc => false,
             _ => true,
-        },
-        _ => true,
+        }
+    } else {
+        true
     }
 }
 
 fn main() -> io::Result<()> {
     let mut game = NEW_BOARD.clone();
-    enable_raw_mode()?;
+    if let Err(e) = enable_raw_mode() {
+        print! {"terminal error: {}", e};
+        std::process::exit(1);
+    }
     game.print();
     while handle_event(&mut game) {
         game.print();
