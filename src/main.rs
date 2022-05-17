@@ -272,15 +272,15 @@ struct Node {
 }
 
 impl Node {
-    fn grow(&mut self, game: &Game, board: &mut Board, color: Color) {
-        let taken = board.move_piece(self.turn);
+    fn grow(&mut self, game: &mut Game, color: Color) {
+        let taken = game.move_piece(self.turn);
         if let Some(children) = &mut self.children {
             for child in children {
-                child.grow(game, board, color);
+                child.grow(game, color);
             }
         } else {
             self.children = Some(
-                board
+                game
                     .all_pieces(color)
                     .iter()
                     .flat_map(|from| {
@@ -298,18 +298,18 @@ impl Node {
                     .collect(),
             );
         }
-        board.undo_move(&self.turn, taken);
+        game.brd.undo_move(&self.turn, taken);
     }
-    fn minmax(&self, board: &mut Board, alpha: i32, beta: i32, is_max: bool) -> i32 {
+    fn minmax(&self, game: &mut Game, alpha: i32, beta: i32, is_max: bool) -> i32 {
         let mut a = alpha;
         let mut b = beta;
-        let taken = board.move_piece(self.turn);
+        let taken = game.move_piece(self.turn);
         let res = if let Some(children) = &self.children {
             match is_max {
                 true => {
                     let mut max = N_INF;
                     for child in children {
-                        let val = child.minmax(board, a, b, false);
+                        let val = child.minmax(game, a, b, false);
                         max = max.max(val);
                         a = a.max(val);
                         if b <= a {
@@ -321,7 +321,7 @@ impl Node {
                 false => {
                     let mut min = INF;
                     for child in children {
-                        let val = child.minmax(board, a, b, true);
+                        let val = child.minmax(game, a, b, true);
                         min = min.min(val);
                         b = b.min(val);
                         if b <= a {
@@ -332,9 +332,9 @@ impl Node {
                 }
             }
         } else {
-            board.evaluate(Black)
+            game.brd.evaluate(Black)
         };
-        board.undo_move(&self.turn, taken);
+        game.brd.undo_move(&self.turn, taken);
         res
     }
 }
@@ -450,14 +450,14 @@ impl Game {
         let nodes = self.get_nodes();
         let scores = Arc::new(Mutex::new(vec![(0, DUMMY_TURN); nodes.len()]));
         nodes.into_par_iter().enumerate().for_each(|(i, mut node)| {
-            let mut temp_board = self.brd;
+            let mut game = self.clone(); // new temporary game to test on
             let a = N_INF;
             let b = INF;
-            node.grow(self, &mut temp_board, White);
-            node.grow(self, &mut temp_board, Black);
-            // node.grow(self, &mut temp_board, White);
-            // node.grow(self, &mut temp_board, Black);
-            scores.lock().unwrap()[i] = (node.minmax(&mut temp_board, a, b, false), node.turn);
+            node.grow(&mut game, White);
+            node.grow(&mut game, Black);
+            node.grow(&mut game, White);
+            node.grow(&mut game, Black);
+            scores.lock().unwrap()[i] = (node.minmax(&mut game, a, b, false), node.turn);
         });
         let best: Vec<(i32, Turn)> =
             scores
