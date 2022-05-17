@@ -3,9 +3,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::io;
 use std::io::stdout;
-use std::sync::atomic;
 use std::sync::{Arc, Mutex};
-const REL: atomic::Ordering = atomic::Ordering::Relaxed;
 use crossterm::{
     cursor::{MoveTo, MoveToNextLine},
     event::{read, Event, KeyCode},
@@ -17,11 +15,6 @@ use rand::prelude::*;
 use rayon::prelude::*;
 use Color::*;
 use Kind::*;
-
-static WHITE_CAN_CASTLE_LEFT: atomic::AtomicBool = atomic::AtomicBool::new(true);
-static WHITE_CAN_CASTLE_RIGHT: atomic::AtomicBool = atomic::AtomicBool::new(true);
-static BLACK_CAN_CASTLE_LEFT: atomic::AtomicBool = atomic::AtomicBool::new(true);
-static BLACK_CAN_CASTLE_RIGHT: atomic::AtomicBool = atomic::AtomicBool::new(true);
 
 static DUMMY_TURN: Turn = Turn {
     to: (0, 0),
@@ -181,6 +174,11 @@ static NEW_BOARD: Game = Game {
     turn: White,
     captured_by_black: vec![],
     captured_by_white: vec![],
+    white_can_castle_left: true,
+    white_can_castle_right: true,
+    black_can_castle_left: true,
+    black_can_castle_right: true,
+
 };
 
 static PIECE_VALUES: [u8; 6] = [
@@ -262,6 +260,10 @@ struct Game {
     turn: Color,
     captured_by_black: Vec<Piece>,
     captured_by_white: Vec<Piece>,
+    white_can_castle_left: bool,
+    white_can_castle_right: bool,
+    black_can_castle_left: bool,
+    black_can_castle_right: bool,
 }
 
 struct Node {
@@ -270,11 +272,11 @@ struct Node {
 }
 
 impl Node {
-    fn grow(&mut self, board: &mut Board, color: Color) {
+    fn grow(&mut self, game: &Game, board: &mut Board, color: Color) {
         let taken = board.move_piece(self.turn);
         if let Some(children) = &mut self.children {
             for child in children {
-                child.grow(board, color);
+                child.grow(game, board, color);
             }
         } else {
             self.children = Some(
@@ -282,7 +284,7 @@ impl Node {
                     .all_pieces(color)
                     .iter()
                     .flat_map(|from| {
-                        legal_moves(board, *from, color)
+                        game.legal_moves(*from, color)
                             .iter()
                             .map(|to| Node {
                                 turn: Turn {
@@ -338,9 +340,9 @@ impl Node {
 }
 
 impl Game {
-    fn render(&self) -> Vec<String> {
+    fn render_board(&self) -> Vec<String> {
         let from: Pos = if self.moving { self.from } else { self.cur };
-        let moves: Vec<Pos> = legal_moves(&self.brd, from, self.turn);
+        let moves: Vec<Pos> = self.legal_moves(from, self.turn);
         self.brd
             .iter()
             .enumerate()
@@ -375,7 +377,7 @@ impl Game {
                 .collect::<String>()
         );
         next_line();
-        for (num, line) in self.render().iter().enumerate() {
+        for (num, line) in self.render_board().iter().enumerate() {
             print!(
                 "{}{}",
                 line,
@@ -383,7 +385,6 @@ impl Game {
             );
             next_line();
         }
-        // print!("{:?}", legal_moves(&game, game.cur));
         print!(
             "{}",
             self.captured_by_black
@@ -410,6 +411,382 @@ impl Game {
             White => self.captured_by_white.push(piece),
             Black => self.captured_by_black.push(piece),
         }
+    }
+    fn all_pieces(&self, color: Color) -> Vec<Pos> {
+        let mut result: Vec<Pos> = vec![];
+        for (y, row) in self.brd.iter().enumerate() {
+            for (x, square) in row.iter().enumerate() {
+                if let Some(piece) = square {
+                    if piece.color == color {
+                        result.push((x, y));
+                    }
+                }
+            }
+        }
+        result
+    }
+    fn move_piece(&mut self, turn: Turn) -> Square {
+        let (a, b) = turn.to;
+        let (x, y) = turn.from;
+        let taken = self.brd[b][a];
+        self.brd[b][a] = self.brd[y][x];
+        self.brd[y][x] = None;
+        taken
+    }
+    fn at(&self, at: Pos) -> Square {
+        self.brd[at.1][at.0]
+    }
+    fn execute_move(&mut self, turn: Turn) {
+        let did_castle = self.castling(turn);
+        if !did_castle {
+            if let Some(piece) = self.brd.move_piece(turn) {
+                self.capture(piece)
+            }
+        }
+        self.moving = false;
+        self.turn = if self.turn == Black { White } else { Black };
+    }
+    fn cpu_turn(&mut self) {
+        let nodes = self.get_nodes();
+        let scores = Arc::new(Mutex::new(vec![(0, DUMMY_TURN); nodes.len()]));
+        nodes.into_par_iter().enumerate().for_each(|(i, mut node)| {
+            let mut temp_board = self.brd;
+            let a = N_INF;
+            let b = INF;
+            node.grow(self, &mut temp_board, White);
+            node.grow(self, &mut temp_board, Black);
+            // node.grow(self, &mut temp_board, White);
+            // node.grow(self, &mut temp_board, Black);
+            scores.lock().unwrap()[i] = (node.minmax(&mut temp_board, a, b, false), node.turn);
+        });
+        let best: Vec<(i32, Turn)> =
+            scores
+                .lock()
+                .unwrap()
+                .iter()
+                .fold(vec![(N_INF, DUMMY_TURN)], |acc, val| {
+                    match val.0.cmp(&acc[0].0) {
+                        Ordering::Greater => vec![*val],
+                        Ordering::Equal => [acc, vec![*val]].concat(),
+                        _ => acc,
+                    }
+                });
+    
+        let mut rng = thread_rng();
+        let im_so_random = rng.gen_range(0, best.len());
+        let choice = best[im_so_random].1;
+    
+        self.execute_move(
+            Turn {
+                from: choice.from,
+                to: choice.to,
+            },
+        );
+        self.cur = choice.to;
+    }
+    fn try_castle(&self, moves: &mut Vec<Pos>, mover: Piece) {
+        match mover.color {
+            White => {
+                if self.white_can_castle_left
+                    && ![(1, 0), (2, 0)]
+                        .iter()
+                        .any(|&square| self.brd.at(square).is_some())
+                {
+                    moves.push((1, 0));
+                }
+                if self.white_can_castle_right
+                    && ![(4, 0), (5, 0), (6, 0)]
+                        .iter()
+                        .any(|&square| self.at(square).is_some())
+                {
+                    moves.push((6, 0));
+                }
+            }
+            Black => {
+                if self.black_can_castle_left
+                    && ![(1, 7), (2, 7)]
+                        .iter()
+                        .any(|&square| self.at(square).is_some())
+                {
+                    moves.push((1, 0));
+                }
+                if self.black_can_castle_right
+                    && ![(4, 7), (5, 7), (6, 7)]
+                        .iter()
+                        .any(|&square| self.at(square).is_some())
+                {
+                    moves.push((6, 0));
+                }
+            }
+        }
+    }
+    
+    fn legal_moves(&self, location: Pos, turn: Color) -> Vec<Pos> {
+        let square = self.at(location);
+        let mut moves: Vec<Pos> = vec![];
+        let piece = match square {
+            Some(occ) => {
+                if occ.color != turn {
+                    // not your turn
+                    return moves;
+                }
+                occ
+            }
+            None => {
+                return moves;
+            }
+        };
+        let x: i8 = location.0 as i8;
+        let y: i8 = location.1 as i8;
+        match piece.kind {
+            Rook => {
+                for _x in (x + 1)..8 {
+                    if !self.try_push(&mut moves, _x, y, piece) {
+                        break;
+                    }
+                }
+                for _x in (0..x).rev() {
+                    if !self.try_push(&mut moves, _x, y, piece) {
+                        break;
+                    }
+                }
+                for _y in (y + 1)..8 {
+                    if !self.try_push( &mut moves, x, _y, piece) {
+                        break;
+                    }
+                }
+                for _y in (0..y).rev() {
+                    if !self.try_push( &mut moves, x, _y, piece) {
+                        break;
+                    }
+                }
+            }
+            Knight => {
+                self.try_push(&mut moves, x + 2, y + 1, piece);
+                self.try_push(&mut moves, x + 2, y - 1, piece);
+                self.try_push(&mut moves, x - 2, y + 1, piece);
+                self.try_push(&mut moves, x - 2, y - 1, piece);
+                self.try_push(&mut moves, x + 1, y + 2, piece);
+                self.try_push(&mut moves, x + 1, y - 2, piece);
+                self.try_push(&mut moves, x - 1, y + 2, piece);
+                self.try_push(&mut moves, x - 1, y - 2, piece);
+            }
+            Bishop => {
+                for num in (-7..0).rev() {
+                    if !self.try_push(&mut moves, x - num, y + num, piece) {
+                        break;
+                    }
+                }
+                for num in 1..7 {
+                    if !self.try_push(&mut moves, x - num, y + num, piece) {
+                        break;
+                    }
+                }
+                for num in (-7..0).rev() {
+                    if !self.try_push(&mut moves, x + num, y + num, piece) {
+                        break;
+                    }
+                }
+                for num in 1..7 {
+                    if !self.try_push(&mut moves, x + num, y + num, piece) {
+                        break;
+                    }
+                }
+            }
+            Queen => {
+                for _x in (x + 1)..8 {
+                    if !self.try_push(&mut moves, _x, y, piece) {
+                        break;
+                    }
+                }
+                for _x in (0..x).rev() {
+                    if !self.try_push(&mut moves, _x, y, piece) {
+                        break;
+                    }
+                }
+                for _y in (y + 1)..8 {
+                    if !self.try_push(&mut moves, x, _y, piece) {
+                        break;
+                    }
+                }
+                for _y in (0..y).rev() {
+                    if !self.try_push(&mut moves, x, _y, piece) {
+                        break;
+                    }
+                }
+                for num in (-7..0).rev() {
+                    if !self.try_push(&mut moves, x - num, y + num, piece) {
+                        break;
+                    }
+                }
+                for num in 1..7 {
+                    if !self.try_push(&mut moves, x - num, y + num, piece) {
+                        break;
+                    }
+                }
+                for num in (-7..0).rev() {
+                    if !self.try_push(&mut moves, x + num, y + num, piece) {
+                        break;
+                    }
+                }
+                for num in 1..7 {
+                    if !self.try_push(&mut moves, x + num, y + num, piece) {
+                        break;
+                    }
+                }
+            }
+            King => {
+                self.try_push(&mut moves, x + 1, y, piece);
+                self.try_push(&mut moves, x + 1, y + 1, piece);
+                self.try_push(&mut moves, x + 1, y - 1, piece);
+                self.try_push(&mut moves, x - 1, y, piece);
+                self.try_push(&mut moves, x - 1, y + 1, piece);
+                self.try_push(&mut moves, x - 1, y - 1, piece);
+                self.try_push(&mut moves, x, y + 1, piece);
+                self.try_push(&mut moves, x, y - 1, piece);
+                self.try_castle(&mut moves, piece);
+            }
+            Pawn => {
+                let home = if turn == White { 1 } else { 6 };
+                let dir: i8 = if turn == White { 1 } else { -1 };
+                if self.push_if_empty(&mut moves, x, y + dir) && y == home {
+                    self.push_if_empty(&mut moves, x, y + (dir * 2));
+                }
+                self.push_if_not_empty(&mut moves, x + 1, y + dir, piece);
+                self.push_if_not_empty(&mut moves, x - 1, y + dir, piece);
+            }
+        }
+        moves
+    }
+    
+    fn castling(&mut self, turn: Turn) -> bool {
+        if let Some(piece) = self.at(turn.from) {
+            match (piece.kind, piece.color, turn.from, turn.to) {
+                (Rook, White, (0, 0), _) => {
+                    self.white_can_castle_left = false;
+                    false
+                }
+                (Rook, White, (7, 0), _) => {
+                    self.white_can_castle_right = false;
+                    false
+                }
+                (Rook, Black, (0, 7), _) => {
+                    self.black_can_castle_left = false;
+                    false
+                }
+                (Rook, Black, (7, 7), _) => {
+                    self.black_can_castle_right = false;
+                    false
+                }
+                (King, White, (3, 0), (1, 0)) => {
+                    self.white_can_castle_left = false;
+                    self.white_can_castle_right = false;
+                    self.move_piece(turn);
+                    self.move_piece(Turn {
+                        from: (0, 0),
+                        to: (2, 0),
+                    }); // castle left
+                    true
+                }
+                (King, White, (3, 0), (6, 0)) => {
+                    self.white_can_castle_left = false;
+                    self.white_can_castle_right = false;
+                    self.move_piece(turn);
+                    self.move_piece(Turn {
+                        from: (7, 0),
+                        to: (5, 0),
+                    }); // castle right
+                    true
+                }
+                (King, Black, (3, 7), (1, 7)) => {
+                    self.white_can_castle_left = false;
+                    self.white_can_castle_right = false;
+                    self.move_piece(turn);
+                    self.move_piece(Turn {
+                        from: (0, 7),
+                        to: (2, 7),
+                    }); // castle left
+                    true
+                }
+                (King, Black, (3, 7), (6, 7)) => {
+                    self.white_can_castle_left = false;
+                    self.white_can_castle_right = false;
+                    self.move_piece(turn);
+                    self.move_piece(Turn {
+                        from: (7, 7),
+                        to: (5, 7),
+                    }); // castle right
+                    true
+                }
+                (King, White, _, _) => {
+                    self.white_can_castle_left = false;
+                    self.white_can_castle_right = false;
+                    false
+                }
+                (King, Black, _, _) => {
+                    self.black_can_castle_left = false;
+                    self.black_can_castle_right = false;
+                    false
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+    fn try_push(&self, moves: &mut Vec<Pos>, x: i8, y: i8, mover: Piece) -> bool {
+        if x > 7 || y > 7 || x < 0 || y < 0 {
+            return false;
+        }
+        let piece: Square = self.brd[y as usize][x as usize];
+        match piece {
+            None => {
+                moves.push((x as usize, y as usize));
+                true
+            }
+            Some(occ) => {
+                if occ.color != mover.color && mover.kind != Pawn {
+                    moves.push((x as usize, y as usize));
+                }
+                false
+            }
+        }
+    }
+    fn push_if_not_empty(&self, moves: &mut Vec<Pos>, x: i8, y: i8, mover: Piece) {
+        if x > 7 || y > 7 || x < 0 || y < 0 {
+            return;
+        }
+        if let Some(piece) = self.brd[y as usize][x as usize] {
+            if piece.color != mover.color {
+                moves.push((x as usize, y as usize));
+            }
+        }
+    } 
+    fn push_if_empty(&self, moves: &mut Vec<Pos>, x: i8, y: i8) -> bool {
+        if x > 7 || y > 7 || x < 0 || y < 0 {
+            return false;
+        }
+        match self.brd[y as usize][x as usize] {
+            None => {
+                moves.push((x as usize, y as usize));
+                true
+            }
+            Some(_) => false,
+        }
+    }
+    fn get_nodes(&self) -> Vec<Node> {
+        let mut nodes: Vec<Node> = vec![];
+        let pieces: Vec<Pos> = self.all_pieces(Black);
+        for from in pieces {
+            let moves = self.legal_moves(from, Black);
+            for to in moves {
+                nodes.push(Node {
+                    turn: Turn { to, from },
+                    children: None,
+                })
+            }
+        }
+        nodes
     }
 }
 
@@ -485,366 +862,6 @@ fn next_line() {
     execute!(stdout(), MoveToNextLine(2),);
 }
 
-fn try_push(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8, mover: Piece) -> bool {
-    if x > 7 || y > 7 || x < 0 || y < 0 {
-        return false;
-    }
-    let piece: Square = board[y as usize][x as usize];
-    match piece {
-        None => {
-            moves.push((x as usize, y as usize));
-            true
-        }
-        Some(occ) => {
-            if occ.color != mover.color && mover.kind != Pawn {
-                moves.push((x as usize, y as usize));
-            }
-            false
-        }
-    }
-}
-
-fn push_if_not_empty(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8, mover: Piece) {
-    if x > 7 || y > 7 || x < 0 || y < 0 {
-        return;
-    }
-    if let Some(piece) = board[y as usize][x as usize] {
-        if piece.color != mover.color {
-            moves.push((x as usize, y as usize));
-        }
-    }
-}
-
-fn push_if_empty(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8) -> bool {
-    if x > 7 || y > 7 || x < 0 || y < 0 {
-        return false;
-    }
-    match board[y as usize][x as usize] {
-        None => {
-            moves.push((x as usize, y as usize));
-            true
-        }
-        Some(_) => false,
-    }
-}
-
-fn try_castle(board: &Board, moves: &mut Vec<Pos>, mover: Piece) {
-    match mover.color {
-        White => {
-            if WHITE_CAN_CASTLE_LEFT.load(REL)
-                && ![(1, 0), (2, 0)]
-                    .iter()
-                    .any(|&square| board.at(square).is_some())
-            {
-                moves.push((1, 0));
-            }
-            if WHITE_CAN_CASTLE_RIGHT.load(REL)
-                && ![(4, 0), (5, 0), (6, 0)]
-                    .iter()
-                    .any(|&square| board.at(square).is_some())
-            {
-                moves.push((6, 0));
-            }
-        }
-        Black => {
-            if BLACK_CAN_CASTLE_LEFT.load(REL)
-                && ![(1, 7), (2, 7)]
-                    .iter()
-                    .any(|&square| board.at(square).is_some())
-            {
-                moves.push((1, 0));
-            }
-            if BLACK_CAN_CASTLE_RIGHT.load(REL)
-                && ![(4, 7), (5, 7), (6, 7)]
-                    .iter()
-                    .any(|&square| board.at(square).is_some())
-            {
-                moves.push((6, 0));
-            }
-        }
-    }
-}
-
-fn legal_moves(board: &Board, location: Pos, turn: Color) -> Vec<Pos> {
-    let square = board.at(location);
-    let mut moves: Vec<Pos> = vec![];
-    let piece = match square {
-        Some(occ) => {
-            if occ.color != turn {
-                // not your turn
-                return moves;
-            }
-            occ
-        }
-        None => {
-            return moves;
-        }
-    };
-    let x: i8 = location.0 as i8;
-    let y: i8 = location.1 as i8;
-    match piece.kind {
-        Rook => {
-            for _x in (x + 1)..8 {
-                if !try_push(board, &mut moves, _x, y, piece) {
-                    break;
-                }
-            }
-            for _x in (0..x).rev() {
-                if !try_push(board, &mut moves, _x, y, piece) {
-                    break;
-                }
-            }
-            for _y in (y + 1)..8 {
-                if !try_push(board, &mut moves, x, _y, piece) {
-                    break;
-                }
-            }
-            for _y in (0..y).rev() {
-                if !try_push(board, &mut moves, x, _y, piece) {
-                    break;
-                }
-            }
-        }
-        Knight => {
-            try_push(board, &mut moves, x + 2, y + 1, piece);
-            try_push(board, &mut moves, x + 2, y - 1, piece);
-            try_push(board, &mut moves, x - 2, y + 1, piece);
-            try_push(board, &mut moves, x - 2, y - 1, piece);
-            try_push(board, &mut moves, x + 1, y + 2, piece);
-            try_push(board, &mut moves, x + 1, y - 2, piece);
-            try_push(board, &mut moves, x - 1, y + 2, piece);
-            try_push(board, &mut moves, x - 1, y - 2, piece);
-        }
-        Bishop => {
-            for num in (-7..0).rev() {
-                if !try_push(board, &mut moves, x - num, y + num, piece) {
-                    break;
-                }
-            }
-            for num in 1..7 {
-                if !try_push(board, &mut moves, x - num, y + num, piece) {
-                    break;
-                }
-            }
-            for num in (-7..0).rev() {
-                if !try_push(board, &mut moves, x + num, y + num, piece) {
-                    break;
-                }
-            }
-            for num in 1..7 {
-                if !try_push(board, &mut moves, x + num, y + num, piece) {
-                    break;
-                }
-            }
-        }
-        Queen => {
-            for _x in (x + 1)..8 {
-                if !try_push(board, &mut moves, _x, y, piece) {
-                    break;
-                }
-            }
-            for _x in (0..x).rev() {
-                if !try_push(board, &mut moves, _x, y, piece) {
-                    break;
-                }
-            }
-            for _y in (y + 1)..8 {
-                if !try_push(board, &mut moves, x, _y, piece) {
-                    break;
-                }
-            }
-            for _y in (0..y).rev() {
-                if !try_push(board, &mut moves, x, _y, piece) {
-                    break;
-                }
-            }
-            for num in (-7..0).rev() {
-                if !try_push(board, &mut moves, x - num, y + num, piece) {
-                    break;
-                }
-            }
-            for num in 1..7 {
-                if !try_push(board, &mut moves, x - num, y + num, piece) {
-                    break;
-                }
-            }
-            for num in (-7..0).rev() {
-                if !try_push(board, &mut moves, x + num, y + num, piece) {
-                    break;
-                }
-            }
-            for num in 1..7 {
-                if !try_push(board, &mut moves, x + num, y + num, piece) {
-                    break;
-                }
-            }
-        }
-        King => {
-            try_push(board, &mut moves, x + 1, y, piece);
-            try_push(board, &mut moves, x + 1, y + 1, piece);
-            try_push(board, &mut moves, x + 1, y - 1, piece);
-            try_push(board, &mut moves, x - 1, y, piece);
-            try_push(board, &mut moves, x - 1, y + 1, piece);
-            try_push(board, &mut moves, x - 1, y - 1, piece);
-            try_push(board, &mut moves, x, y + 1, piece);
-            try_push(board, &mut moves, x, y - 1, piece);
-            try_castle(board, &mut moves, piece);
-        }
-        Pawn => {
-            let home = if turn == White { 1 } else { 6 };
-            let dir: i8 = if turn == White { 1 } else { -1 };
-            if push_if_empty(board, &mut moves, x, y + dir) && y == home {
-                push_if_empty(board, &mut moves, x, y + (dir * 2));
-            }
-            push_if_not_empty(board, &mut moves, x + 1, y + dir, piece);
-            push_if_not_empty(board, &mut moves, x - 1, y + dir, piece);
-        }
-    }
-    moves
-}
-
-fn castling(game: &mut Game, turn: Turn) -> bool {
-    if let Some(piece) = game.brd.at(turn.from) {
-        match (piece.kind, piece.color, turn.from, turn.to) {
-            (Rook, White, (0, 0), _) => {
-                WHITE_CAN_CASTLE_LEFT.store(false, REL);
-                false
-            }
-            (Rook, White, (7, 0), _) => {
-                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
-                false
-            }
-            (Rook, Black, (0, 7), _) => {
-                BLACK_CAN_CASTLE_LEFT.store(false, REL);
-                false
-            }
-            (Rook, Black, (7, 7), _) => {
-                BLACK_CAN_CASTLE_RIGHT.store(false, REL);
-                false
-            }
-            (King, White, (3, 0), (1, 0)) => {
-                WHITE_CAN_CASTLE_LEFT.store(false, REL);
-                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
-                game.brd.move_piece(turn);
-                game.brd.move_piece(Turn {
-                    from: (0, 0),
-                    to: (2, 0),
-                }); // castle left
-                true
-            }
-            (King, White, (3, 0), (6, 0)) => {
-                WHITE_CAN_CASTLE_LEFT.store(false, REL);
-                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
-                game.brd.move_piece(turn);
-                game.brd.move_piece(Turn {
-                    from: (7, 0),
-                    to: (5, 0),
-                }); // castle right
-                true
-            }
-            (King, Black, (3, 7), (1, 7)) => {
-                WHITE_CAN_CASTLE_LEFT.store(false, REL);
-                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
-                game.brd.move_piece(turn);
-                game.brd.move_piece(Turn {
-                    from: (0, 7),
-                    to: (2, 7),
-                }); // castle left
-                true
-            }
-            (King, Black, (3, 7), (6, 7)) => {
-                WHITE_CAN_CASTLE_LEFT.store(false, REL);
-                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
-                game.brd.move_piece(turn);
-                game.brd.move_piece(Turn {
-                    from: (7, 7),
-                    to: (5, 7),
-                }); // castle right
-                true
-            }
-            (King, White, _, _) => {
-                WHITE_CAN_CASTLE_LEFT.store(false, REL);
-                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
-                false
-            }
-            (King, Black, _, _) => {
-                BLACK_CAN_CASTLE_RIGHT.store(false, REL);
-                BLACK_CAN_CASTLE_LEFT.store(false, REL);
-                false
-            }
-            _ => false,
-        }
-    } else {
-        false
-    }
-}
-
-fn execute_move(game: &mut Game, turn: Turn) {
-    let did_castle = castling(game, turn);
-    if !did_castle {
-        if let Some(piece) = game.brd.move_piece(turn) {
-            game.capture(piece)
-        }
-    }
-    game.moving = false;
-    game.turn = if game.turn == Black { White } else { Black };
-}
-
-fn get_nodes(board: &Board) -> Vec<Node> {
-    let mut nodes: Vec<Node> = vec![];
-    let pieces: Vec<Pos> = board.all_pieces(Black);
-    for from in pieces {
-        let moves = legal_moves(board, from, Black);
-        for to in moves {
-            nodes.push(Node {
-                turn: Turn { to, from },
-                children: None,
-            })
-        }
-    }
-    nodes
-}
-
-fn cpu_turn(game: &mut Game) {
-    let nodes = get_nodes(&game.brd);
-    let scores = Arc::new(Mutex::new(vec![(0, DUMMY_TURN); nodes.len()]));
-    nodes.into_par_iter().enumerate().for_each(|(i, mut nod)| {
-        let mut temp_board = game.brd;
-        let a = N_INF;
-        let b = INF;
-        nod.grow(&mut temp_board, White);
-        nod.grow(&mut temp_board, Black);
-        nod.grow(&mut temp_board, White);
-        nod.grow(&mut temp_board, Black);
-        scores.lock().unwrap()[i] = (nod.minmax(&mut temp_board, a, b, false), nod.turn);
-    });
-    let best: Vec<(i32, Turn)> =
-        scores
-            .lock()
-            .unwrap()
-            .iter()
-            .fold(vec![(N_INF, DUMMY_TURN)], |acc, val| {
-                match val.0.cmp(&acc[0].0) {
-                    Ordering::Greater => vec![*val],
-                    Ordering::Equal => [acc, vec![*val]].concat(),
-                    _ => acc,
-                }
-            });
-
-    let mut rng = thread_rng();
-    let im_so_random = rng.gen_range(0, best.len());
-    let choice = best[im_so_random].1;
-
-    execute_move(
-        game,
-        Turn {
-            from: choice.from,
-            to: choice.to,
-        },
-    );
-    game.cur = choice.to;
-}
-
 fn handle_event(game: &mut Game) -> bool {
     match read().unwrap() {
         Event::Key(event) => match event.code {
@@ -888,17 +905,16 @@ fn handle_event(game: &mut Game) -> bool {
                         }
                     }
                 } else {
-                    let moves = legal_moves(&game.brd, game.from, game.turn);
+                    let moves = game.legal_moves(game.from, game.turn);
                     if moves.contains(&game.cur) {
-                        execute_move(
-                            game,
+                        game.execute_move(
                             Turn {
                                 from: game.from,
                                 to: game.cur,
                             },
                         );
                         game.print();
-                        cpu_turn(game);
+                        game.cpu_turn();
                     } else if game.cur == game.from {
                         // drop the piece
                         game.moving = false;
