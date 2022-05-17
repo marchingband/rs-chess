@@ -1,5 +1,6 @@
 #![warn(clippy::all)]
-use std::sync::{atomic};
+use std::sync::atomic;
+const REL: atomic::Ordering = atomic::Ordering::Relaxed;
 use crossterm::{
     cursor::{MoveTo, MoveToNextLine},
     event::{read, Event, KeyCode},
@@ -12,6 +13,7 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::io;
 use std::io::stdout;
+use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::{thread, time};
 use Color::*;
@@ -65,66 +67,6 @@ type Square = Option<Piece>;
 type Pos = (usize, usize);
 type Board = [[Square; 8]; 8];
 
-trait Chess {
-    fn get_all(&self, color: Color) -> Vec<Pos>;
-    fn move_piece(&mut self, from: Pos, to: Pos) -> Square;
-    fn at(&self, at: Pos) -> Square;
-    fn evaluate(&self, color: Color) -> i32;
-}
-
-impl Chess for Board {
-    fn evaluate(&self, color: Color) -> i32 {
-        let mut score: i32 = 0;
-        let mine = self.get_all(color);
-        let them = self.get_all(if color == Black { White } else { Black });
-        for pos in mine {
-            if let Some(piece) = self.at(pos) {
-                score += PIECE_VALUES[piece.kind as usize] as i32;
-            }
-        }
-        for pos in them {
-            if let Some(piece) = self.at(pos) {
-                score -= PIECE_VALUES[piece.kind as usize] as i32;
-            }
-        }
-        for position in POSITIONAL_VALUES {
-            let (pos, val) = position;
-            if let Some(piece) = self.at(pos) {
-                if piece.color == color {
-                    score += val as i32;
-                } else {
-                    score -= val as i32;
-                }
-            }
-        }
-        score
-    }
-    fn get_all(&self, color: Color) -> Vec<Pos> {
-        let mut result: Vec<Pos> = vec![];
-        for (y, row) in self.iter().enumerate() {
-            for (x, square) in row.iter().enumerate() {
-                if let Some(piece) = square {
-                    if piece.color == color {
-                        result.push((x, y));
-                    }
-                }
-            }
-        }
-        result
-    }
-    fn move_piece(&mut self, from: Pos, to: Pos) -> Square {
-        let (a, b) = to;
-        let (x, y) = from;
-        let taken = self[b][a];
-        self[b][a] = self[y][x];
-        self[y][x] = None;
-        taken
-    }
-    fn at(&self, at: Pos) -> Square {
-        self[at.1][at.0]
-    }
-}
-
 #[derive(Clone, Copy)]
 struct Move {
     from: Pos,
@@ -143,10 +85,11 @@ struct Game {
     captured_by_black: Vec<Piece>,
     captured_by_white: Vec<Piece>,
 }
-static white_can_castle_left:   atomic::AtomicBool = atomic::AtomicBool::new(true);
-static white_can_castle_right:  atomic::AtomicBool = atomic::AtomicBool::new(true);
-static black_can_castle_left:   atomic::AtomicBool = atomic::AtomicBool::new(true);
-static black_can_castle_right:  atomic::AtomicBool = atomic::AtomicBool::new(true);
+
+static WHITE_CAN_CASTLE_LEFT: atomic::AtomicBool = atomic::AtomicBool::new(true);
+static WHITE_CAN_CASTLE_RIGHT: atomic::AtomicBool = atomic::AtomicBool::new(true);
+static BLACK_CAN_CASTLE_LEFT: atomic::AtomicBool = atomic::AtomicBool::new(true);
+static BLACK_CAN_CASTLE_RIGHT: atomic::AtomicBool = atomic::AtomicBool::new(true);
 
 impl Game {
     fn render(&self) -> Vec<String> {
@@ -388,6 +331,17 @@ static PIECE_VALUES: [u8; 6] = [
     2,   // Pawn,
 ];
 
+static POSITION_VALUE_GRID: [[i8; 8]; 8] = [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 2, 2, 1, 0, 0],
+    [0, 0, 1, 2, 2, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0],
+];
+
 static POSITIONAL_VALUES: [(Pos, usize); 16] = [
     ((3, 3), 2),
     ((4, 3), 2),
@@ -439,24 +393,38 @@ fn push_if_empty(board: &Board, moves: &mut Vec<Pos>, x: i8, y: i8) -> bool {
     }
 }
 
-const rel: atomic::Ordering = atomic::Ordering::Relaxed;
-
-fn try_castle(board: &Board, moves: &mut Vec<Pos>, mover: Piece){
+fn try_castle(board: &Board, moves: &mut Vec<Pos>, mover: Piece) {
     match mover.color {
         White => {
-            if white_can_castle_left.load(rel) && ![(1,0), (2,0)].iter().any(|&square| board.at(square).is_some()) {
-                moves.push((1,0));
+            if WHITE_CAN_CASTLE_LEFT.load(REL)
+                && ![(1, 0), (2, 0)]
+                    .iter()
+                    .any(|&square| board.at(square).is_some())
+            {
+                moves.push((1, 0));
             }
-            if white_can_castle_right.load(rel) && ![(4,0), (5,0), (6,0)].iter().any(|&square| board.at(square).is_some()) {
-                moves.push((6,0));
+            if WHITE_CAN_CASTLE_RIGHT.load(REL)
+                && ![(4, 0), (5, 0), (6, 0)]
+                    .iter()
+                    .any(|&square| board.at(square).is_some())
+            {
+                moves.push((6, 0));
             }
         }
         Black => {
-            if black_can_castle_left.load(rel) && ![(1,7), (2,7)].iter().any(|&square| board.at(square).is_some()) {
-                moves.push((1,0));
+            if BLACK_CAN_CASTLE_LEFT.load(REL)
+                && ![(1, 7), (2, 7)]
+                    .iter()
+                    .any(|&square| board.at(square).is_some())
+            {
+                moves.push((1, 0));
             }
-            if black_can_castle_right.load(rel) && ![(4,7), (5,7), (6,7)].iter().any(|&square| board.at(square).is_some()) {
-                moves.push((6,0));
+            if BLACK_CAN_CASTLE_RIGHT.load(REL)
+                && ![(4, 7), (5, 7), (6, 7)]
+                    .iter()
+                    .any(|&square| board.at(square).is_some())
+            {
+                moves.push((6, 0));
             }
         }
     }
@@ -619,62 +587,76 @@ fn allow_moves(board: &Board, location: Pos, turn: Color) -> Vec<Pos> {
     moves
 }
 
-fn execute_move(game: &mut Game, from: Pos, to: Pos) {
-    if let Some(piece) = game.brd.at(from) { // castling logic
+fn castling(game: &mut Game, from: Pos, to: Pos) -> bool {
+    if let Some(piece) = game.brd.at(from) {
         match (piece.kind, piece.color, from, to) {
-            (Rook, White, (0, 0), _) => white_can_castle_left.store(false, rel),
-            (Rook, White, (7, 0), _) => white_can_castle_right.store(false, rel),
-            (Rook, Black, (0, 7), _) => black_can_castle_left.store(false, rel),
-            (Rook, Black, (7, 7), _) => black_can_castle_right.store(false, rel),
+            (Rook, White, (0, 0), _) => {
+                WHITE_CAN_CASTLE_LEFT.store(false, REL);
+                false
+            }
+            (Rook, White, (7, 0), _) => {
+                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
+                false
+            }
+            (Rook, Black, (0, 7), _) => {
+                BLACK_CAN_CASTLE_LEFT.store(false, REL);
+                false
+            }
+            (Rook, Black, (7, 7), _) => {
+                BLACK_CAN_CASTLE_RIGHT.store(false, REL);
+                false
+            }
             (King, White, (3, 0), (1, 0)) => {
-                white_can_castle_left.store(false, rel);
-                white_can_castle_right.store(false, rel);
+                WHITE_CAN_CASTLE_LEFT.store(false, REL);
+                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
                 game.brd.move_piece(from, to);
                 game.brd.move_piece((0, 0), (2, 0)); // castle left
-                game.moving = false;
-                game.turn = if game.turn == Black { White } else { Black };
-                return;            
+                true
             }
             (King, White, (3, 0), (6, 0)) => {
-                white_can_castle_left.store(false, rel);
-                white_can_castle_right.store(false, rel);
+                WHITE_CAN_CASTLE_LEFT.store(false, REL);
+                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
                 game.brd.move_piece(from, to);
                 game.brd.move_piece((7, 0), (5, 0)); // castle right
-                game.moving = false;
-                game.turn = if game.turn == Black { White } else { Black };            
-                return;            
+                true
             }
-            (King, Black, (3, 7), (1,7)) => {
-                white_can_castle_left.store(false, rel);
-                white_can_castle_right.store(false, rel);
+            (King, Black, (3, 7), (1, 7)) => {
+                WHITE_CAN_CASTLE_LEFT.store(false, REL);
+                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
                 game.brd.move_piece(from, to);
                 game.brd.move_piece((0, 7), (2, 7)); // castle left
-                game.moving = false;
-                game.turn = if game.turn == Black { White } else { Black };            
-                return;            
+                true
             }
-            (King, Black, (3, 7), (6,7)) => {
-                white_can_castle_left.store(false, rel);
-                white_can_castle_right.store(false, rel);
+            (King, Black, (3, 7), (6, 7)) => {
+                WHITE_CAN_CASTLE_LEFT.store(false, REL);
+                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
                 game.brd.move_piece(from, to);
                 game.brd.move_piece((7, 7), (5, 7)); // castle right
-                game.moving = false;
-                game.turn = if game.turn == Black { White } else { Black };
-                return;            
+                true
             }
             (King, White, _, _) => {
-                white_can_castle_left.store(false, rel);
-                white_can_castle_right.store(false, rel);
+                WHITE_CAN_CASTLE_LEFT.store(false, REL);
+                WHITE_CAN_CASTLE_RIGHT.store(false, REL);
+                false
             }
             (King, Black, _, _) => {
-                black_can_castle_right.store(false, rel);
-                black_can_castle_left.store(false, rel);
+                BLACK_CAN_CASTLE_RIGHT.store(false, REL);
+                BLACK_CAN_CASTLE_LEFT.store(false, REL);
+                false
             }
-            _ => {}
+            _ => false,
         }
+    } else {
+        false
     }
-    if let Some(piece) = game.brd.move_piece(from, to) {
-        game.capture(piece)
+}
+
+fn execute_move(game: &mut Game, from: Pos, to: Pos) {
+    let did_castle = castling(game, from, to);
+    if !did_castle {
+        if let Some(piece) = game.brd.move_piece(from, to) {
+            game.capture(piece)
+        }
     }
     game.moving = false;
     game.turn = if game.turn == Black { White } else { Black };
@@ -727,7 +709,12 @@ fn handle_event(game: &mut Game) -> bool {
                     if moves.contains(&game.cur) {
                         execute_move(game, game.from, game.cur);
                         game.print();
-                        cpu_turn(game);
+                        // ai_turn(game);
+                        // comp_turn(game);
+                        // comp_test(game);
+                        // cpu_turn(game);
+                        // take_turn(game);
+                        take_turn2(game);
                     } else if game.cur == game.from {
                         // drop the piece
                         game.moving = false;
@@ -803,6 +790,23 @@ fn get_opts(board: &Board) -> Vec<Opt> {
     }
     options
 }
+fn get_nods(board: &Board) -> Vec<Nod> {
+    let mut nods: Vec<Nod> = vec![];
+    let pieces: Vec<Pos> = board.get_all(Black);
+    for from in pieces {
+        let moves = allow_moves(board, from, Black);
+        for to in moves {
+            nods.push(Nod {
+                turn: Turn{
+                    to,
+                    from
+                },
+                children: None,
+            })
+        }
+    }
+    nods
+}
 
 fn pick_option(options: Vec<Opt>) -> Move {
     // let list = Arc::new(Mutex::new(vec!()));
@@ -876,6 +880,9 @@ struct Node {
     children: Option<Vec<Node>>,
 }
 
+static INF: i32 = 10_000;
+static N_INF: i32 = -10_000;
+
 impl Node {
     fn grow(&mut self) {
         if let Some(children) = &mut self.children {
@@ -891,6 +898,31 @@ impl Node {
                 let moves = allow_moves(&board, from, Black);
                 for to in moves {
                     let mut option = board;
+                    option.move_piece(from, to);
+                    children.push(Node {
+                        board: option,
+                        children: None,
+                    })
+                }
+            }
+            self.children = Some(children);
+        }
+    }
+    fn branch(&mut self, color: Color) {
+        if let Some(children) = &mut self.children {
+            // children
+            //     .into_par_iter()
+            //     .for_each(|child| child.branch(color));
+            for child in children {
+                child.grow();
+            }
+        } else {
+            let mut children: Vec<Node> = vec![];
+            let pieces: Vec<Pos> = self.board.get_all(color);
+            for from in pieces {
+                let moves = allow_moves(&self.board, from, color);
+                for to in moves {
+                    let mut option = self.board;
                     option.move_piece(from, to);
                     children.push(Node {
                         board: option,
@@ -924,6 +956,147 @@ impl Node {
             return vec![self.board];
         }
     }
+    fn minimax(&self, mut a: i32, mut b: i32, is_max: bool) -> i32 {
+        if let Some(children) = &self.children {
+            match is_max {
+                true => {
+                    let mut max = N_INF;
+                    for child in children {
+                        let val = child.minimax(a, b, false);
+                        max = max.max(val);
+                        a = a.max(val);
+                        if b <= a {
+                            break;
+                        }
+                    }
+                    max
+                }
+                false => {
+                    let mut min = INF;
+                    for child in children {
+                        let val = child.minimax(a, b, true);
+                        min = min.min(val);
+                        b = b.min(val);
+                        if b <= a {
+                            break;
+                        }
+                    }
+                    min
+                }
+            }
+        } else {
+            self.board.evaluate(Black)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Turn {
+    from: Pos,
+    to: Pos,
+}
+
+trait Chess {
+    fn get_all(&self, color: Color) -> Vec<Pos>;
+    fn move_piece(&mut self, from: Pos, to: Pos) -> Square;
+    fn at(&self, at: Pos) -> Square;
+    fn evaluate(&self, color: Color) -> i32;
+    fn get_moves(&self, color: Color) -> Vec<Turn>;
+    fn exec(&mut self, turn: &Turn) -> Option<Piece>;
+    fn rev(&mut self, turn: &Turn, taken: Option<Piece>);
+}
+
+impl Chess for Board {
+    fn evaluate(&self, color: Color) -> i32 {
+        let mut score: i32 = 0;
+        for (y, row) in self.iter().enumerate() {
+            for (x, square) in row.iter().enumerate() {
+                if let Some(piece) = square {
+                    if piece.color == color {
+                        score += PIECE_VALUES[piece.kind as usize] as i32;
+                        score += POSITION_VALUE_GRID[y][x] as i32;
+                    } else {
+                        score -= PIECE_VALUES[piece.kind as usize] as i32;
+                        score -= POSITION_VALUE_GRID[y][x] as i32;
+                    }
+                }
+            }
+        }
+        score
+        // let mut score: i32 = 0;
+        // let mine = self.get_all(color);
+        // let them = self.get_all(if color == Black { White } else { Black });
+        // for pos in mine {
+        //     if let Some(piece) = self.at(pos) {
+        //         score += PIECE_VALUES[piece.kind as usize] as i32;
+        //     }
+        // }
+        // for pos in them {
+        //     if let Some(piece) = self.at(pos) {
+        //         score -= PIECE_VALUES[piece.kind as usize] as i32;
+        //     }
+        // }
+        // for position in POSITIONAL_VALUES {
+        //     let (pos, val) = position;
+        //     if let Some(piece) = self.at(pos) {
+        //         if piece.color == color {
+        //             score += val as i32;
+        //         } else {
+        //             score -= val as i32;
+        //         }
+        //     }
+        // }
+        // score
+    }
+    fn get_all(&self, color: Color) -> Vec<Pos> {
+        let mut result: Vec<Pos> = vec![];
+        for (y, row) in self.iter().enumerate() {
+            for (x, square) in row.iter().enumerate() {
+                if let Some(piece) = square {
+                    if piece.color == color {
+                        result.push((x, y));
+                    }
+                }
+            }
+        }
+        result
+    }
+    fn move_piece(&mut self, from: Pos, to: Pos) -> Square {
+        let (a, b) = to;
+        let (x, y) = from;
+        let taken = self[b][a];
+        self[b][a] = self[y][x];
+        self[y][x] = None;
+        taken
+    }
+    fn at(&self, at: Pos) -> Square {
+        self[at.1][at.0]
+    }
+    fn get_moves(&self, color: Color) -> Vec<Turn> {
+        let mut result: Vec<Turn> = vec![];
+        let froms: Vec<Pos> = self.get_all(color);
+        for from in froms {
+            let tos = allow_moves(self, from, color);
+            for to in tos {
+                result.push(Turn { from, to })
+            }
+        }
+        result
+    }
+    fn exec(&mut self, turn: &Turn) -> Option<Piece> {
+        let (a, b) = turn.to;
+        let (x, y) = turn.from;
+        let taken = self[b][a];
+        self[b][a] = self[y][x];
+        self[y][x] = None;
+        taken
+    }
+    fn rev(&mut self, turn: &Turn, taken: Option<Piece>) {
+        let (a, b) = turn.from;
+        let (x, y) = turn.to;
+        self[b][a] = self[y][x];
+        self[y][x] = taken;
+    }
 }
 
 #[derive(Clone)]
@@ -941,6 +1114,401 @@ fn cpu_turn(game: &mut Game) {
         // option.tree.grow();
     }
     let choice: Move = pick_option(options);
+    execute_move(game, choice.from, choice.to);
+    game.cur = choice.to;
+}
+
+fn ai_turn(game: &mut Game) {
+    // let choices: Vec<(Turn, i32)> = game.brd.get_moves(Black).into_iter().map(|b1| { // list of black choices
+    let choices: Vec<Turn> = game.brd.get_moves(Black); // list of black choices
+    let choice_tree: Vec<(&Turn, i32)> = choices
+        .iter()
+        .map(|b1| {
+            let taken = game.brd.exec(b1);
+            let best_white = game
+                .brd
+                .get_moves(White)
+                .iter()
+                .map(|w1| {
+                    // list of white responses
+                    let taken = game.brd.exec(w1);
+                    let best_black = game
+                        .brd
+                        .get_moves(Black)
+                        .iter()
+                        .map(|b2| {
+                            // list of black responses
+                            let taken = game.brd.exec(b2);
+                            let best_white = game
+                                .brd
+                                .get_moves(White)
+                                .iter()
+                                .map(|w2| {
+                                    // list of white responses
+                                    let taken = game.brd.exec(w2);
+                                    let best_black = game
+                                        .brd
+                                        .get_moves(Black)
+                                        .iter()
+                                        .map(|b3| {
+                                            // list of black responses
+                                            let taken = game.brd.exec(b3);
+                                            let score = game.brd.evaluate(Black);
+                                            game.brd.rev(b3, taken);
+                                            score
+                                        })
+                                        .max()
+                                        .unwrap();
+                                    // let score = game.brd.evaluate(Black);
+                                    game.brd.rev(w2, taken);
+                                    best_black
+                                    // score
+                                    // }).min().unwrap_or(10000000);
+                                })
+                                .min()
+                                .unwrap();
+                            game.brd.rev(b2, taken);
+                            best_white
+                            // }).max().unwrap_or(-10000000); // the best for black
+                        })
+                        .max()
+                        .unwrap(); // the best for black
+                    game.brd.rev(w1, taken);
+                    best_black
+                })
+                .min()
+                .unwrap(); // the best for white
+                           // }).min().unwrap_or(10000000); // the best for white
+            game.brd.rev(b1, taken);
+            (b1, best_white) // score of whites best response
+        })
+        .collect();
+    let choice = choice_tree
+        .iter()
+        .fold(
+            &choice_tree[0],
+            |acc, val| if acc.1 > val.1 { acc } else { val },
+        )
+        .0;
+    execute_move(game, choice.from, choice.to);
+}
+
+use std::time::Instant;
+
+fn comp_turn(game: &mut Game) {
+    // let start = Instant::now();
+    let options: Vec<Opt> = get_opts(&game.brd);
+    let mut nodes: Vec<Node> = options.iter().map(|o| o.tree.clone()).collect();
+    let mut scores = vec![0; nodes.len()];
+    let a = N_INF;
+    let b = INF;
+    for (i, node) in nodes.iter_mut().enumerate() {
+        // let start_branching = Instant::now();
+        node.branch(White);
+        node.branch(Black);
+        node.branch(White);
+        node.branch(Black);
+        // let done_branching = Instant::now();
+        scores[i] = node.minimax(a, b, false);
+        // let done_minimax = Instant::now();
+        // print!("{:?} {:?} {:?}", start_branching, done_branching, done_minimax);
+    }
+    let mut best_score_indicies: Vec<usize> = vec![0];
+    for (i, score) in scores.iter().enumerate() {
+        match (score).cmp(&scores[best_score_indicies[0]]) {
+            Ordering::Greater => best_score_indicies = vec![i],
+            Ordering::Equal => best_score_indicies.push(i),
+            _ => {}
+        }
+    }
+    let mut rng = thread_rng();
+    let im_so_random = rng.gen_range(0, best_score_indicies.len());
+
+    execute_move(
+        game,
+        options[best_score_indicies[im_so_random]].from,
+        options[best_score_indicies[im_so_random]].to,
+    );
+}
+
+fn comp_test(game: &mut Game) {
+    let a = N_INF;
+    let b = INF;
+    // let options: Vec<Opt> = get_opts(&game.brd);
+    // let nodes: Vec<Node> = options.iter().map(|o| o.tree.clone()).collect();
+    let mut root: Node = Node {
+        board: game.brd,
+        children: None,
+    };
+    root.branch(Black);
+    root.branch(White);
+    root.branch(Black);
+    // root.branch(White);
+    let choice = root.minimax(a, b, true);
+    print!("{}", choice);
+    print!("done");
+}
+
+struct Nod {
+    turn: Turn,
+    children: Option<Vec<Nod>>,
+}
+
+struct NodVal {
+    turn: Turn,
+    score: i32,
+}
+
+fn wait() {
+    match read().unwrap() {
+        Event::Key(event) => match event.code {
+            KeyCode::Esc => {
+                exit(1);
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+impl Nod {
+    fn grow(&mut self, board: &mut Board, color: Color, has_move: bool) {
+        let mut taken = None;
+        if has_move {
+            taken = board.exec(&self.turn)
+        };
+
+        if let Some(children) = &mut self.children {
+            for child in children {
+                child.grow(board, color, true);
+            }
+        } else {
+            let mut children: Vec<Nod> = vec![];
+            let pieces: Vec<Pos> = board.get_all(color);
+            for from in pieces {
+                let moves = allow_moves(board, from, color);
+                for to in moves {
+                    children.push(Nod {
+                        turn: Turn { from, to },
+                        children: None,
+                    })
+                }
+            }
+            self.children = Some(children);
+        }
+
+        if has_move {
+            board.rev(&self.turn, taken);
+        }
+    }
+
+    fn minimax(
+        &self,
+        // mut board: Board,
+        game: &mut Game,
+        alpha: i32,
+        beta: i32,
+        is_max: bool,
+        is_root: bool,
+    ) -> NodVal {
+        let mut a = alpha;
+        let mut b = beta;
+        if let Some(children) = &self.children {
+            let mut taken = None;
+            if !is_root {
+                taken = game.brd.exec(&self.turn)
+            };
+            // game.print();
+            // read().unwrap();
+            let res = match is_max {
+                true => {
+                    let mut max = NodVal {
+                        score: N_INF,
+                        turn: Turn {
+                            from: (0, 0),
+                            to: (0, 0),
+                        },
+                    };
+                    for child in children {
+                        let val = child.minimax(game, a, b, false, false);
+                        let m = val.score;
+                        max = if max.score > val.score { max } else { val };
+                        // a = if a > max.score { a } else { max.score };
+                        a = a.max(m);
+                        // game.print();
+                        // print!("score:{} max:{} alpha:{}", m, max.score, a);
+                        // next_line();
+                        // wait();
+
+                        if b <= a {
+                            break;
+                        }
+                    }
+                    // board.rev(&self.turn, taken);
+                    if is_root {
+                        NodVal {
+                            score: max.score,
+                            turn: max.turn,
+                        }
+                    } else {
+                        NodVal {
+                            score: max.score,
+                            turn: self.turn,
+                        }
+                    }
+                }
+                false => {
+                    // let taken = board.exec(&self.turn);
+                    let mut min = NodVal {
+                        score: INF,
+                        turn: Turn {
+                            from: (0, 0),
+                            to: (0, 0),
+                        },
+                    };
+                    for child in children {
+                        let val = child.minimax(game, a, b, true, false);
+                        let m = val.score;
+                        min = if val.score < min.score { val } else { min };
+                        b = b.min(m);
+
+                        // game.print();
+                        // print!("score:{} min:{} beta:{}", m, min.score, b);
+                        // next_line();
+                        // wait();
+
+                        if b <= a {
+                            break;
+                        }
+                    }
+                    // board.rev(&self.turn, taken);
+                    if is_root {
+                        NodVal {
+                            score: min.score,
+                            turn: min.turn,
+                        }
+                    } else {
+                        NodVal {
+                            score: min.score,
+                            turn: self.turn,
+                        }
+                    }
+                }
+            };
+            if !is_root {
+                game.brd.rev(&self.turn, taken);
+            }
+            res
+        } else {
+            let taken = game.brd.exec(&self.turn);
+            let score = game.brd.evaluate(Black);
+            // game.print();
+            // print!("{}", score);
+            // next_line();
+            // wait();
+            game.brd.rev(&self.turn, taken);
+            NodVal {
+                turn: self.turn,
+                score,
+            }
+        }
+    }
+    fn minmax(&self, board: &mut Board, alpha: i32, beta: i32, is_max: bool) -> i32 {
+        let mut a = alpha;
+        let mut b = beta;
+        let taken = board.exec(&self.turn);
+        let res = if let Some(children) = &self.children {
+            match is_max {
+                true => {
+                    let mut max = N_INF;
+                    for child in children {
+                        let val = child.minmax(board, a, b, false);
+                        max = max.max(val);
+                        a = a.max(val);
+                        if b <= a {
+                            break;
+                        }
+                    }
+                    max
+                }
+                false => {
+                    let mut min = INF;
+                    for child in children {
+                        let val = child.minmax(board, a, b, true);
+                        min = min.min(val);
+                        b = b.min(val);
+                        if b <= a {
+                            break;
+                        }
+                    }
+                    min
+                }
+            }
+        } else {
+            board.evaluate(Black)
+        };
+        board.rev(&self.turn, taken);
+        res
+    }
+}
+
+fn take_turn(game: &mut Game) {
+    let mut board = game.brd;
+    let mut root = Nod {
+        turn: Turn {
+            to: (0, 0),
+            from: (0, 0),
+        },
+        children: None,
+    };
+    root.grow(&mut board, Black, false);
+    root.grow(&mut board, White, false);
+    root.grow(&mut board, Black, false);
+    // root.grow(&mut board, White, false);
+    // root.grow(&mut board, Black, false);
+    let a = N_INF;
+    let b = INF;
+    let choice: NodVal = root.minimax(game, a, b, false, true);
+    print!("got {}", choice.score);
+    next_line();
+    thread::sleep(time::Duration::from_secs(2));
+    execute_move(game, choice.turn.from, choice.turn.to);
+}
+
+static DUMMY_TURN: Turn = Turn {
+    to: (0, 0),
+    from: (0, 0),
+};
+
+fn take_turn2(game: &mut Game) {
+    let nods = get_nods(&game.brd);
+    let scores = Arc::new(Mutex::new(vec!((0, DUMMY_TURN); nods.len())));
+    nods.into_par_iter().enumerate().for_each(|(i, mut nod)| {
+        let mut temp_board = game.brd;
+        let a = N_INF;
+        let b = INF;
+        nod.grow(&mut temp_board, White, true);
+        nod.grow(&mut temp_board, Black, true);
+        nod.grow(&mut temp_board, White, true);
+        // nod.grow(&mut temp_board, Black, true);
+        scores.lock().unwrap()[i] = (nod.minmax(&mut temp_board, a, b, false), nod.turn);
+    });
+    
+    let best: Vec<(i32, Turn)> =
+        scores.lock().unwrap()
+            .iter()
+            .fold(vec![(N_INF, DUMMY_TURN)], |acc, val| {
+                match val.0.cmp(&acc[0].0) {
+                    Ordering::Greater => vec![*val],
+                    Ordering::Equal => [acc, vec![*val]].concat(),
+                    _ => acc,
+                }
+            });
+
+    let mut rng = thread_rng();
+    let im_so_random = rng.gen_range(0, best.len());
+    let choice = best[im_so_random].1;
+
     execute_move(game, choice.from, choice.to);
     game.cur = choice.to;
 }
